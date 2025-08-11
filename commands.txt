@@ -1,0 +1,32 @@
+
+
+ curl -s -X POST 'http://localhost:4000/photos/presign' \
+  -H 'Content-Type: application/json' \
+  -d '{"filename":"test.jpeg","filetype":"image/jpeg"}' > presign.json
+
+
+
+
+PURL=$(node -e "console.log(JSON.parse(require('fs').readFileSync('presign.json')).presigned.url)")
+KEY=$(node -e "console.log(JSON.parse(require('fs').readFileSync('presign.json')).key)")
+POLICY=$(node -e "console.log(JSON.parse(require('fs').readFileSync('presign.json')).presigned.fields.Policy)")
+ALG=$(node -e "console.log(JSON.parse(require('fs').readFileSync('presign.json')).presigned.fields['X-Amz-Algorithm'])")
+CRED=$(node -e "console.log(JSON.parse(require('fs').readFileSync('presign.json')).presigned.fields['X-Amz-Credential'])")
+DATE=$(node -e "console.log(JSON.parse(require('fs').readFileSync('presign.json')).presigned.fields['X-Amz-Date'])")
+SIG=$(node -e "console.log(JSON.parse(require('fs').readFileSync('presign.json')).presigned.fields['X-Amz-Signature'])")
+echo "Ticket shows credential: $CRED"   # should include YOUR key id
+
+
+
+
+
+curl -v -X POST "$PURL" \
+  --form-string "key=$KEY" \
+  --form-string "Policy=$POLICY" \
+  --form-string "X-Amz-Algorithm=$ALG" \
+  --form-string "X-Amz-Credential=$CRED" \
+  --form-string "X-Amz-Date=$DATE" \
+  --form-string "X-Amz-Signature=$SIG" \
+  --form "file=@/Users/asad/dev/alpha-api/test.jpeg;type=image/jpeg"
+
+

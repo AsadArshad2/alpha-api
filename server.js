@@ -22,6 +22,20 @@ AWS.config.update({
 });
 const s3 = new AWS.S3();
 console.log('Using AWS key:', AWS.config.credentials.accessKeyId);
+const BUCKET = process.env.S3_BUCKET;
+
+function signPhotoUrl(key, expiresSeconds = 3600) {
+  if (!key) return null;
+  return s3.getSignedUrl('getObject', {
+    Bucket: BUCKET,
+    Key: key,
+    Expires: expiresSeconds,
+  });
+}
+
+function toNum(v) {
+  return v === undefined || v === null ? null : Number(v);
+}
 
 
 // Health
@@ -66,42 +80,61 @@ app.post('/photos/presign', async (req, res) => {
 app.post('/bookings', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { shift_id, type, lat, lng, photo_key } = req.body || {};
-    if (!shift_id || !type || typeof lat !== 'number' || typeof lng !== 'number') {
-      return res.status(400).json({ error: 'missing_or_invalid_fields' });
+    const { shift_id, type, lat, lng, photo_key, taken_at } = req.body || {};
+
+    if (!shift_id || !type) {
+      return res.status(400).json({ ok: false, error: 'shift_id and type are required' });
     }
-    if (!['on', 'off'].includes(type)) {
-      return res.status(400).json({ error: 'invalid_type' });
+    if (!['on', 'off'].includes(String(type))) {
+      return res.status(400).json({ ok: false, error: "type must be 'on' or 'off'" });
     }
+
+    const latNum = toNum(lat);
+    const lngNum = toNum(lng);
+    if ((lat !== undefined && Number.isNaN(latNum)) || (lng !== undefined && Number.isNaN(lngNum))) {
+      return res.status(400).json({ ok: false, error: 'lat/lng must be numbers if provided' });
+    }
+
+    const takenAtParam = taken_at ? new Date(taken_at) : null;
+    const takenAtValid = takenAtParam instanceof Date && !Number.isNaN(takenAtParam.valueOf());
 
     await client.query('BEGIN');
 
     let photoId = null;
+    let photoUrl = null;
     if (photo_key) {
       const pr = await client.query(
-        'INSERT INTO photos (s3_key) VALUES ($1) RETURNING id',
-        [photo_key]
+        `INSERT INTO photos (s3_key) VALUES ($1) RETURNING id, s3_key`,
+        [String(photo_key)]
       );
       photoId = pr.rows[0].id;
+      photoUrl = signPhotoUrl(pr.rows[0].s3_key);
     }
 
     const br = await client.query(
-      `INSERT INTO bookings (shift_id, type, lat, lng, photo_id)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, captured_at`,
-      [shift_id, type, lat, lng, photoId]
+      `INSERT INTO bookings (shift_id, type, lat, lng, photo_id, captured_at)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW()))
+       RETURNING id, shift_id, type, lat, lng, photo_id, captured_at`,
+      [Number(shift_id), String(type), latNum, lngNum, photoId, takenAtValid ? takenAtParam.toISOString() : null]
     );
 
     await client.query('COMMIT');
-    res.json({ id: br.rows[0].id, captured_at: br.rows[0].captured_at });
+
+    const booking = br.rows[0];
+    return res.status(201).json({ ok: true, booking: { ...booking, photo_url: photoUrl } });
   } catch (e) {
     await client.query('ROLLBACK');
-    console.error(e);
-    res.status(500).json({ error: 'server_error' });
+    // 23503 = foreign key violation (e.g., shift_id not found)
+    if (e && e.code === '23503') {
+      return res.status(400).json({ ok: false, error: 'foreign_key_violation', detail: e.detail });
+    }
+    console.error('POST /bookings error:', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
   } finally {
     client.release();
   }
 });
+
 
 app.listen(process.env.PORT, () => {
   console.log(`API running on port ${process.env.PORT}`);
